@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Blocky Game City</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1020; }
+    .chat-input-wrap { position: absolute; left: 50%; transform: translateX(-50%); bottom: 20px; width: min(680px, 90vw); pointer-events: auto; display: none; z-index: 100; }
+    .chat-input { width: 100%; font-size: 16px; padding: 14px 16px; border-radius: 14px; border: 1px solid rgba(255,255,255,.12); background: rgba(16,20,35,.9); color: white; outline: none; }
+    .bubble { position: absolute; transform: translate(-50%, -100%); background: white; color: #0a0a0a; padding: 8px 10px; border-radius: 12px; border: 2px solid #e6e6e6; white-space: pre-wrap; max-width: 280px; box-shadow: 0 8px 20px rgba(0,0,0,.15); font-size: 14px; }
+    .bubble::after { content: ""; position: absolute; left: 50%; bottom: -8px; transform: translateX(-50%); width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-top: 8px solid white; }
+  </style>
+  <script src="https://unpkg.com/three@0.159.0/build/three.min.js"></script>
+</head>
+<body>
+  <div id="chatWrap" class="chat-input-wrap">
+    <input id="chatInput" class="chat-input" maxlength="140" placeholder="type your message…" />
+  </div>
+  <script>
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceeb);
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 2000);
+
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6); scene.add(hemi);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.8); dir.position.set(5, 8, 3); scene.add(dir);
+
+  // --- City ---
+  function createCity(size=20, spacing=20) {
+    const roadMat = new THREE.MeshLambertMaterial({ color: 0x333333 });
+    const bldgMats = [
+      new THREE.MeshLambertMaterial({ color: 0xc0392b }),
+      new THREE.MeshLambertMaterial({ color: 0x2980b9 }),
+      new THREE.MeshLambertMaterial({ color: 0x27ae60 }),
+      new THREE.MeshLambertMaterial({ color: 0xf39c12 }),
+      new THREE.MeshLambertMaterial({ color: 0x8e44ad })
+    ];
+    for (let x=-size; x<=size; x++) {
+      for (let z=-size; z<=size; z++) {
+        const worldX = x*spacing;
+        const worldZ = z*spacing;
+        if (x%2===0 || z%2===0) {
+          const road = new THREE.Mesh(new THREE.PlaneGeometry(spacing, spacing), roadMat);
+          road.rotation.x = -Math.PI/2;
+          road.position.set(worldX,0,worldZ);
+          scene.add(road);
+        } else {
+          const h = 5 + Math.random()*45;
+          const bldg = new THREE.Mesh(new THREE.BoxGeometry(12,h,12), bldgMats[Math.floor(Math.random()*bldgMats.length)]);
+          bldg.position.set(worldX, h/2, worldZ);
+          scene.add(bldg);
+        }
+      }
+    }
+  }
+  createCity();
+
+  // --- Player character ---
+  const player = new THREE.Group();
+  const skin = new THREE.MeshLambertMaterial({ color: 0xffe0bd });
+  const torsoMat = new THREE.MeshLambertMaterial({ color: 0xff3b30 });
+  const legMat = new THREE.MeshLambertMaterial({ color: 0x2ecc71 });
+
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.9,0.9,0.9), skin); head.position.y = 2; player.add(head);
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(1.2,1.4,0.6), torsoMat); torso.position.y = 1.05; player.add(torso);
+  const armL = new THREE.Mesh(new THREE.BoxGeometry(0.35,1.2,0.35), skin); armL.position.set(-0.875,1.1,0); player.add(armL);
+  const armR = new THREE.Mesh(new THREE.BoxGeometry(0.35,1.2,0.35), skin); armR.position.set(0.875,1.1,0); player.add(armR);
+  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.45,1.2,0.45), legMat); legL.position.set(-0.35,0.2,0); player.add(legL);
+  const legR = new THREE.Mesh(new THREE.BoxGeometry(0.45,1.2,0.45), legMat); legR.position.set(0.35,0.2,0); player.add(legR);
+
+  scene.add(player);
+
+  let velY = 0; let onGround=true; let flyMode=false;
+  const GRAVITY=-20; const JUMP_VELOCITY=8;
+  const keys={w:false,a:false,s:false,d:false,shift:false,space:false,left:false,right:false,up:false,down:false};
+
+  let camDist = 8;
+  let camHeight = 4;
+  let camAngle = 0;
+
+  const chatWrap=document.getElementById('chatWrap');
+  const chatInput=document.getElementById('chatInput');
+  let chatActive=false;
+
+  function openChat(){ chatWrap.style.display='block'; chatInput.value=''; chatActive=true; chatInput.focus(); }
+  function closeChat(){ chatWrap.style.display='none'; chatActive=false; renderer.domElement.focus(); }
+
+  const bubbles=[];
+  function addBubble(text){
+    const el=document.createElement('div'); el.className='bubble'; el.textContent=text;
+    document.body.appendChild(el);
+    bubbles.push({ el, ttl:6, worldOffset:new THREE.Vector3(0,2.3,0) });
+  }
+
+  window.addEventListener('keydown', e=>{
+    if (chatActive){
+      if (e.key==='Enter'){
+        const msg=chatInput.value.trim();
+        if (msg){
+          addBubble(msg);
+          if (msg===';fly') flyMode=true;
+          if (msg===';unfly') flyMode=false;
+        }
+        closeChat();
+      } else if (e.key==='Escape'){ closeChat(); }
+      return;
+    }
+    if (e.key==='/'){ e.preventDefault(); openChat(); return; }
+    if (e.key.toLowerCase()==='w') keys.w=true;
+    if (e.key.toLowerCase()==='a') keys.a=true;
+    if (e.key.toLowerCase()==='s') keys.s=true;
+    if (e.key.toLowerCase()==='d') keys.d=true;
+    if (e.code==='Space'){ keys.space=true; if(onGround && !flyMode){ velY=JUMP_VELOCITY; onGround=false; } }
+    if (e.key==='Shift') keys.shift=true;
+    if (e.key==='ArrowLeft' || e.key==='<') keys.left=true;
+    if (e.key==='ArrowRight' || e.key==='>') keys.right=true;
+    if (e.key==='ArrowUp') keys.up=true;
+    if (e.key==='ArrowDown') keys.down=true;
+    if (e.key==='=') camDist=Math.max(2,camDist-0.5);
+    if (e.key==='-') camDist+=0.5;
+  });
+  window.addEventListener('keyup', e=>{
+    if (chatActive) return;
+    if (e.key.toLowerCase()==='w') keys.w=false;
+    if (e.key.toLowerCase()==='a') keys.a=false;
+    if (e.key.toLowerCase()==='s') keys.s=false;
+    if (e.key.toLowerCase()==='d') keys.d=false;
+    if (e.code==='Space') keys.space=false;
+    if (e.key==='Shift') keys.shift=false;
+    if (e.key==='ArrowLeft' || e.key==='<') keys.left=false;
+    if (e.key==='ArrowRight' || e.key==='>') keys.right=false;
+    if (e.key==='ArrowUp') keys.up=false;
+    if (e.key==='ArrowDown') keys.down=false;
+  });
+
+  let velX=0, velZ=0; const MOVE_SPEED=6, FRICTION=10;
+  const proj=new THREE.Vector3();
+  function updateBubblePositions(dt){
+    for(let i=bubbles.length-1;i>=0;i--){
+      const b=bubbles[i]; b.ttl-=dt; if(b.ttl<=0){ b.el.remove(); bubbles.splice(i,1); continue; }
+      proj.copy(player.position).add(b.worldOffset).project(camera);
+      b.el.style.left=( (proj.x*0.5+0.5)*window.innerWidth )+'px';
+      b.el.style.top=( (-proj.y*0.5+0.5)*window.innerHeight )+'px';
+    }
+  }
+
+  const clock=new THREE.Clock();
+  function animate(){
+    requestAnimationFrame(animate);
+    const dt=Math.min(clock.getDelta(),0.033);
+
+    let dx=0,dz=0;
+    if(keys.w) dz-=1; if(keys.s) dz+=1; if(keys.a) dx-=1; if(keys.d) dx+=1;
+    const len=Math.hypot(dx,dz); if(len>0){ dx/=len; dz/=len; }
+    velX+=(dx*MOVE_SPEED-velX)*Math.min(1,dt*FRICTION);
+    velZ+=(dz*MOVE_SPEED-velZ)*Math.min(1,dt*FRICTION);
+
+    const forward=new THREE.Vector3(Math.sin(camAngle),0,Math.cos(camAngle));
+    const right=new THREE.Vector3(forward.z,0,-forward.x);
+
+    player.position.addScaledVector(forward, velZ*dt);
+    player.position.addScaledVector(right, velX*dt);
+
+    if(!flyMode){
+      velY+=GRAVITY*dt;
+      player.position.y+=velY*dt;
+      if(player.position.y<=0){ player.position.y=0; velY=0; onGround=true; }
+    } else {
+      if(keys.space) player.position.y+=MOVE_SPEED*dt*2;
+      if(keys.shift) player.position.y-=MOVE_SPEED*dt*2;
+    }
+
+    if(keys.left) camAngle+=1*dt;
+    if(keys.right) camAngle-=1*dt;
+    if(keys.up) camHeight=Math.min(10,camHeight+10*dt);
+    if(keys.down) camHeight=Math.max(1,camHeight-10*dt);
+
+    const camX = player.position.x - Math.sin(camAngle)*camDist;
+    const camZ = player.position.z - Math.cos(camAngle)*camDist;
+    const camY = player.position.y + camHeight;
+    camera.position.lerp(new THREE.Vector3(camX,camY,camZ),0.15);
+    camera.lookAt(player.position.clone().add(new THREE.Vector3(0,1.5,0)));
+
+    updateBubblePositions(dt);
+    renderer.render(scene,camera);
+  }
+  animate();
+
+  window.addEventListener('resize',()=>{
+    camera.aspect=window.innerWidth/window.innerHeight; camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth,window.innerHeight);
+  });
+
+  renderer.domElement.setAttribute('tabindex','0');
+  renderer.domElement.focus();
+  </script>
+</body>
+</html>
+>
